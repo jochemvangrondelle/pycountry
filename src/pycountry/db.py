@@ -1,10 +1,15 @@
 import json
 import logging
 import threading
-from collections.abc import Iterator
-from typing import Any, Callable, Generic, Optional, TypeVar, Union, cast
+from collections.abc import Callable, Iterator
+from typing import Any, Optional, TypeVar, Union
+
+from typing_extensions import ParamSpec
 
 logger = logging.getLogger("pycountry.db")
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 
 class Data:
@@ -29,7 +34,7 @@ class Data:
     def __dir__(self) -> list[str]:
         return dir(self.__class__) + list(self._fields)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[tuple[str, str]]:
         # allow casting into a dict
         for field in self._fields:
             yield field, getattr(self, field)
@@ -43,23 +48,17 @@ class Subdivision(Data):
     pass
 
 
-F = TypeVar("F", bound=Callable[..., Any])
-
-
-def lazy_load(f: F) -> F:
-    def load_if_needed(self, *args, **kw):
+def lazy_load(f: Callable[_P, _R]) -> Callable[_P, _R]:
+    def load_if_needed(self: Any, *args: _P.args, **kw: _P.kwargs) -> _R:
         if not self._is_loaded:
             with self._load_lock:
                 self._load()
         return f(self, *args, **kw)
 
-    return cast(F, load_if_needed)
+    return load_if_needed  # type: ignore[return-value]
 
 
-T = TypeVar("T", bound=Data)
-
-
-class Database(Generic[T]):
+class Database:
     data_class: Union[type, str]
     root_key: Optional[str] = None
     no_index: list[str] = []
@@ -74,11 +73,11 @@ class Database(Generic[T]):
         else:
             self.factory = self.data_class
 
-    def _clear(self):
+    def _clear(self) -> None:
         self._is_loaded = False
-        self.objects = []
-        self.index_names = set()
-        self.indices = {}
+        self.objects: list[Data] = []
+        self.index_names: set[str] = set()
+        self.indices: dict[str, dict[str, Data]] = {}
 
     def _load(self) -> None:
         if self._is_loaded:
@@ -114,7 +113,7 @@ class Database(Generic[T]):
     # Public API
 
     @lazy_load
-    def add_entry(self, **kw):
+    def add_entry(self, **kw: str) -> None:
         # create the object with the correct dynamic type
         obj = self.factory(**kw)
 
@@ -130,14 +129,16 @@ class Database(Generic[T]):
             index[value] = obj
 
     @lazy_load
-    def remove_entry(self, **kw):
+    def remove_entry(self, **kw: str) -> None:
         # make sure that we receive None if no entry found
         if "default" in kw:
             del kw["default"]
-        obj = self.get(**kw)
+        # get() validates at runtime that kw values are str
+        obj: Optional[Data] = self.get(**kw)  # type: ignore[arg-type]
         if not obj:
             raise KeyError(
-                f"{self.factory.__name__} not found and cannot be removed: {kw}"
+                f"{self.factory.__name__} not found and cannot be "
+                f"removed: {kw}"
             )
 
         # remove object
@@ -153,7 +154,7 @@ class Database(Generic[T]):
                 del index[value]
 
     @lazy_load
-    def __iter__(self) -> Iterator[T]:
+    def __iter__(self) -> Iterator[Data]:
         return iter(self.objects)
 
     @lazy_load
@@ -162,8 +163,8 @@ class Database(Generic[T]):
 
     @lazy_load
     def get(
-        self, *, default: Optional[T] = None, **kw: Optional[str]
-    ) -> Optional[T]:
+        self, *, default: Optional[Data] = None, **kw: str
+    ) -> Optional[Data]:
         if len(kw) != 1:
             raise TypeError("Only one criteria may be given")
         field, value = kw.popitem()
@@ -181,7 +182,7 @@ class Database(Generic[T]):
             return default
 
     @lazy_load
-    def lookup(self, value: str) -> T:
+    def lookup(self, value: str) -> Data:
         if not isinstance(value, str):
             raise LookupError()
 
